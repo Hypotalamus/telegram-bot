@@ -1,5 +1,5 @@
 /* TODO:
-- add database (?)
+- restore subscribers on bootloading
 
 - change start time to 9:00 next day (remindJobs)
 - change period to 1 day
@@ -15,6 +15,7 @@ import (
 	"bot_module/keyboard"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	bolt "go.etcd.io/bbolt"
 )
 
 func main() {
@@ -22,7 +23,18 @@ func main() {
 
 	tgbot, err := tgbotapi.NewBotAPI(os.Getenv("TELEGRAM_APITOKEN"))
 	if err != nil {
-		panic(err)
+		log.Fatal(err)
+	}
+
+	db, err := bolt.Open("bot.db", 0666, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	err = bot.SetupDB(db)
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	tgbot.Debug = false
@@ -49,7 +61,7 @@ func main() {
 			case "cancel":
 				msgText = bot.CancelCmdResponse()
 			case "subscribe":
-				msgText = bot.SubscribeCmdResponse(tgbot, update.Message.Chat.ID)
+				msgText = bot.SubscribeCmdResponse(tgbot, update.Message.Chat.ID, db)
 			case "unsubscribe":
 				msgText = bot.UnsubscribeCmdResponse(update.Message.Chat.ID)
 			case "done":
@@ -65,16 +77,16 @@ func main() {
 				msgText = bot.OnMsgJobWaitResponse(&tempItem, update.Message.Text)
 			case bot.DateWaitAdd:
 				msgText, _ = bot.OnMsgDateWaitAddResponse(&tempItem, update.Message.Text,
-					update.Message.Chat.ID)
+					update.Message.Chat.ID, db)
 			case bot.DateWaitShow:
 				msgText, _ = bot.OnMsgDateWaitShowResponse(&tempItem, update.Message.Text,
-					update.Message.Chat.ID)
+					update.Message.Chat.ID, db)
 			case bot.DateWaitDone:
 				msgText, _ = bot.OnMsgDateWaitDoneResponse(update.Message.Text,
-					update.Message.Chat.ID)
+					update.Message.Chat.ID, db)
 			case bot.WaitKeyPress:
-				msgText = bot.OnMsgWaitKeyPressResponse(update.Message.Text,
-					update.Message.Chat.ID)
+				msgText, _ = bot.OnMsgWaitKeyPressResponse(update.Message.Text,
+					update.Message.Chat.ID, db)
 			}
 		}
 

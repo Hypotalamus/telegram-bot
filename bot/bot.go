@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"strconv"
@@ -11,6 +12,7 @@ import (
 	"bot_module/keyboard"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	bolt "go.etcd.io/bbolt"
 )
 
 /****************
@@ -51,7 +53,6 @@ const (
 
 var CurrState State
 var muSendMsg sync.Mutex
-var jobs map[JKey][]common.JItem
 var subscribers map[int64]chan struct{}
 
 /****************
@@ -59,7 +60,6 @@ var subscribers map[int64]chan struct{}
 ****************/
 func init() {
 	CurrState = Idle
-	jobs = make(map[JKey][]common.JItem)
 	subscribers = make(map[int64]chan struct{})
 }
 
@@ -114,7 +114,7 @@ func CancelCmdResponse() string {
 	}
 }
 
-func SubscribeCmdResponse(tgbot *tgbotapi.BotAPI, chatID int64) string {
+func SubscribeCmdResponse(tgbot *tgbotapi.BotAPI, chatID int64, db *bolt.DB) string {
 	var msg string
 	if CurrState == Idle {
 		if _, ok := subscribers[chatID]; ok {
@@ -123,7 +123,7 @@ func SubscribeCmdResponse(tgbot *tgbotapi.BotAPI, chatID int64) string {
 			msg = "You are subscribed now. To unsubscribe enter /unsubscribe command."
 			ch := make(chan struct{})
 			subscribers[chatID] = ch
-			go remindJobs(tgbot, chatID, period, ch, chatID)
+			go remindJobs(tgbot, chatID, period, ch, chatID, db)
 		}
 	} else {
 		msg = "Please complete current operation or cancel it using /cancel."
@@ -170,36 +170,61 @@ func OnMsgJobWaitResponse(item *Item, answer string) string {
 	return "Please Enter date in format dd-mm-yyyy."
 }
 
-func OnMsgDateWaitAddResponse(item *Item, answer string, chatID int64) (string, error) {
+func OnMsgDateWaitAddResponse(
+	item *Item,
+	answer string,
+	chatID int64,
+	db *bolt.DB,
+) (string, error) {
 	date, err := time.Parse(dateFormat, answer)
 	if err != nil {
 		return "Could not parse date. Try again in format dd-mm-yyyy.", err
 	}
-	item.JDate = timeToDate(date)
-	key := JKey{ChatID: chatID, Date: item.JDate}
-	jobs[key] = append(jobs[key], item.JItem)
+	dateStruct := timeToDate(date)
+	item.JDate = dateStruct
 	CurrState = Idle
+	jobs, err := getData(db, chatID, dateStruct)
+	if err != nil {
+		return "Could not read from database. Try operation again.", err
+	}
+	jobs = append(jobs, item.JItem)
+	err = putData(db, chatID, dateStruct, jobs)
+	if err != nil {
+		return "Could not write to database. Try operation again.", err
+	}
 	return "Your job was added.", nil
 }
 
-func OnMsgDateWaitShowResponse(item *Item, answer string, chatID int64) (string, error) {
+func OnMsgDateWaitShowResponse(
+	item *Item,
+	answer string,
+	chatID int64,
+	db *bolt.DB,
+) (string, error) {
 	date, err := time.Parse(dateFormat, answer)
 	if err != nil {
 		return "Could not parse date. Try again in format dd-mm-yyyy.", err
 	}
 	dateStruct := timeToDate(date)
+	joblist, err := getAllJobs(dateStruct, chatID, db)
 	CurrState = Idle
-	return getAllJobs(dateStruct, chatID), nil
+	if err != nil {
+		return "Could not read from database. Try operation again.", err
+	}
+	return joblist, nil
 }
 
-func OnMsgDateWaitDoneResponse(answer string, chatID int64) (string, error) {
+func OnMsgDateWaitDoneResponse(answer string, chatID int64, db *bolt.DB) (string, error) {
 	date, err := time.Parse(dateFormat, answer)
 	if err != nil {
 		return "Could not parse date. Try again in format dd-mm-yyyy.", err
 	}
 	dateStruct := timeToDate(date)
-	key := JKey{ChatID: chatID, Date: dateStruct}
-	msg, ok := keyboard.ShowKeyboard(dateStruct, jobs[key])
+	jobs, err := getData(db, chatID, dateStruct)
+	if err != nil {
+		return "Could not read from database. Try operation again", err
+	}
+	msg, ok := keyboard.ShowKeyboard(dateStruct, jobs)
 	if ok {
 		CurrState = WaitKeyPress
 	} else {
@@ -208,22 +233,29 @@ func OnMsgDateWaitDoneResponse(answer string, chatID int64) (string, error) {
 	return msg, nil
 }
 
-func OnMsgWaitKeyPressResponse(answer string, chatID int64) string {
+func OnMsgWaitKeyPressResponse(answer string, chatID int64, db *bolt.DB) (string, error) {
 	num, err := strconv.Atoi(answer)
 	if err != nil || num < 0 || num > keyboard.ItemsCount() {
-		return "Press the button on keyboard or type appropriate number."
+		return "Press the button on keyboard or type appropriate number.", nil
 	}
 	keyboard.Hide()
 	CurrState = Idle
 	if num == 0 {
-		return "Operation canceled."
+		return "Operation canceled.", nil
 	} else {
 		num--
 		date := keyboard.Date()
 		itemInd := keyboard.Index(num)
-		key := JKey{ChatID: chatID, Date: date}
-		jobs[key][itemInd].Done = true
-		return "Well done!"
+		jobs, err := getData(db, chatID, date)
+		if err != nil {
+			return "Could not read from database. Try operation again.", err
+		}
+		jobs[itemInd].Done = true
+		err = putData(db, chatID, date, jobs)
+		if err != nil {
+			return "Could not write to database. Try operation again.", err
+		}
+		return "Well done!", nil
 	}
 
 }
@@ -245,6 +277,7 @@ func remindJobs(
 	period time.Duration,
 	done chan struct{},
 	chatID int64,
+	db *bolt.DB,
 ) {
 	tNow := time.Now()
 	// yyyy, mm, dd := tNow.Date()
@@ -263,10 +296,13 @@ func remindJobs(
 		select {
 		case now := <-t.C:
 			date := timeToDate(now)
-			jobList := getAllJobs(date, chatID)
-			msg := tgbotapi.NewMessage(subscriberID, jobList)
-			if err := SendMsg(tgbot, &msg); err != nil {
-				log.Printf("Something went wrong: %v\n", err)
+			joblist, err := getAllJobs(date, chatID, db)
+			if err != nil {
+				log.Printf("Could not read from database: %v\n", err)
+			}
+			msg := tgbotapi.NewMessage(subscriberID, joblist)
+			if err = SendMsg(tgbot, &msg); err != nil {
+				log.Printf("Could not send message to Telegram: %v\n", err)
 			}
 		case <-done:
 			t.Stop()
@@ -275,18 +311,21 @@ func remindJobs(
 	}
 }
 
-func getAllJobs(t common.Date, chatID int64) string {
-	var msg string
-	key := JKey{ChatID: chatID, Date: t}
-	if len(jobs[key]) == 0 {
+func getAllJobs(t common.Date, chatID int64, db *bolt.DB) (string, error) {
+	jobs, err := getData(db, chatID, t)
+	if err != nil {
+		return "Could not read from database.", err
+	}
+	msg := ""
+	if len(jobs) == 0 {
 		msg = "No jobs were planned on this date."
 	} else {
-		for i, job := range jobs[key] {
+		for i, job := range jobs {
 			jobState := getDoneStr(job.Done)
 			msg += fmt.Sprintf("%d. %s - %s\n", i+1, job.Job, jobState)
 		}
 	}
-	return msg
+	return msg, nil
 }
 
 func timeToDate(t time.Time) common.Date {
@@ -300,4 +339,54 @@ func getDoneStr(b bool) string {
 	} else {
 		return "TODO"
 	}
+}
+
+/*****************************
+* Work with data storage
+*****************************/
+func putData(db *bolt.DB, chatID int64, date common.Date, data []common.JItem) error {
+	err := db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("Default"))
+		key := JKey{ChatID: chatID, Date: date}
+		keyBytes, err := json.Marshal(key)
+		if err != nil {
+			return err
+		}
+		valBytes, err := json.Marshal(data)
+		if err != nil {
+			return err
+		}
+		err = b.Put(keyBytes, valBytes)
+		return err
+	})
+	return err
+}
+
+func getData(db *bolt.DB, chatID int64, date common.Date) ([]common.JItem, error) {
+	res := []common.JItem{}
+	err := db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("Default"))
+		key := JKey{ChatID: chatID, Date: date}
+		keyBytes, err := json.Marshal(key)
+		if err != nil {
+			return err
+		}
+		v := b.Get(keyBytes)
+		if v != nil {
+			err = json.Unmarshal(v, &res)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return res, err
+}
+
+func SetupDB(db *bolt.DB) error {
+	err := db.Update(func(tx *bolt.Tx) error {
+		_, err := tx.CreateBucketIfNotExists([]byte("Default"))
+		return err
+	})
+	return err
 }
