@@ -1,5 +1,4 @@
 /* TODO:
-- add to map chatID level
 - add database (?)
 
 - change start time to 9:00 next day (remindJobs)
@@ -65,17 +64,20 @@ func main() {
 			case bot.JobWait:
 				msgText = bot.OnMsgJobWaitResponse(&tempItem, update.Message.Text)
 			case bot.DateWaitAdd:
-				msgText, _ = bot.OnMsgDateWaitAddResponse(&tempItem, update.Message.Text)
+				msgText, _ = bot.OnMsgDateWaitAddResponse(&tempItem, update.Message.Text,
+					update.Message.Chat.ID)
 			case bot.DateWaitShow:
-				msgText, _ = bot.OnMsgDateWaitShowResponse(&tempItem, update.Message.Text)
+				msgText, _ = bot.OnMsgDateWaitShowResponse(&tempItem, update.Message.Text,
+					update.Message.Chat.ID)
 			case bot.DateWaitDone:
-				msgText, _ = bot.OnMsgDateWaitDoneResponse(update.Message.Text)
+				msgText, _ = bot.OnMsgDateWaitDoneResponse(update.Message.Text,
+					update.Message.Chat.ID)
 			case bot.WaitKeyPress:
-				msgText = bot.OnMsgWaitKeyPressResponse(update.Message.Text)
+				msgText = bot.OnMsgWaitKeyPressResponse(update.Message.Text,
+					update.Message.Chat.ID)
 			}
 		}
 
-		// TODO: refactor me
 		if msgText != "" {
 			msg := tgbotapi.NewMessage(update.Message.Chat.ID, msgText)
 			if keyboard.MustBeShown() {

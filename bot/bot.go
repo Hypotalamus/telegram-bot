@@ -24,6 +24,11 @@ type Item struct {
 	JDate common.Date
 }
 
+type JKey struct {
+	ChatID int64
+	Date   common.Date
+}
+
 /****************
 * Constants
 ****************/
@@ -46,7 +51,7 @@ const (
 
 var CurrState State
 var muSendMsg sync.Mutex
-var jobs map[common.Date][]common.JItem
+var jobs map[JKey][]common.JItem
 var subscribers map[int64]chan struct{}
 
 /****************
@@ -54,7 +59,7 @@ var subscribers map[int64]chan struct{}
 ****************/
 func init() {
 	CurrState = Idle
-	jobs = make(map[common.Date][]common.JItem)
+	jobs = make(map[JKey][]common.JItem)
 	subscribers = make(map[int64]chan struct{})
 }
 
@@ -118,7 +123,7 @@ func SubscribeCmdResponse(tgbot *tgbotapi.BotAPI, chatID int64) string {
 			msg = "You are subscribed now. To unsubscribe enter /unsubscribe command."
 			ch := make(chan struct{})
 			subscribers[chatID] = ch
-			go remindJobs(tgbot, chatID, period, ch)
+			go remindJobs(tgbot, chatID, period, ch, chatID)
 		}
 	} else {
 		msg = "Please complete current operation or cancel it using /cancel."
@@ -165,34 +170,36 @@ func OnMsgJobWaitResponse(item *Item, answer string) string {
 	return "Please Enter date in format dd-mm-yyyy."
 }
 
-func OnMsgDateWaitAddResponse(item *Item, answer string) (string, error) {
+func OnMsgDateWaitAddResponse(item *Item, answer string, chatID int64) (string, error) {
 	date, err := time.Parse(dateFormat, answer)
 	if err != nil {
 		return "Could not parse date. Try again in format dd-mm-yyyy.", err
 	}
 	item.JDate = timeToDate(date)
-	jobs[item.JDate] = append(jobs[item.JDate], item.JItem)
+	key := JKey{ChatID: chatID, Date: item.JDate}
+	jobs[key] = append(jobs[key], item.JItem)
 	CurrState = Idle
 	return "Your job was added.", nil
 }
 
-func OnMsgDateWaitShowResponse(item *Item, answer string) (string, error) {
+func OnMsgDateWaitShowResponse(item *Item, answer string, chatID int64) (string, error) {
 	date, err := time.Parse(dateFormat, answer)
 	if err != nil {
 		return "Could not parse date. Try again in format dd-mm-yyyy.", err
 	}
 	dateStruct := timeToDate(date)
 	CurrState = Idle
-	return getAllJobs(dateStruct), nil
+	return getAllJobs(dateStruct, chatID), nil
 }
 
-func OnMsgDateWaitDoneResponse(answer string) (string, error) {
+func OnMsgDateWaitDoneResponse(answer string, chatID int64) (string, error) {
 	date, err := time.Parse(dateFormat, answer)
 	if err != nil {
 		return "Could not parse date. Try again in format dd-mm-yyyy.", err
 	}
 	dateStruct := timeToDate(date)
-	msg, ok := keyboard.ShowKeyboard(dateStruct, jobs[dateStruct])
+	key := JKey{ChatID: chatID, Date: dateStruct}
+	msg, ok := keyboard.ShowKeyboard(dateStruct, jobs[key])
 	if ok {
 		CurrState = WaitKeyPress
 	} else {
@@ -201,7 +208,7 @@ func OnMsgDateWaitDoneResponse(answer string) (string, error) {
 	return msg, nil
 }
 
-func OnMsgWaitKeyPressResponse(answer string) string {
+func OnMsgWaitKeyPressResponse(answer string, chatID int64) string {
 	num, err := strconv.Atoi(answer)
 	if err != nil || num < 0 || num > keyboard.ItemsCount() {
 		return "Press the button on keyboard or type appropriate number."
@@ -214,7 +221,8 @@ func OnMsgWaitKeyPressResponse(answer string) string {
 		num--
 		date := keyboard.Date()
 		itemInd := keyboard.Index(num)
-		jobs[date][itemInd].Done = true
+		key := JKey{ChatID: chatID, Date: date}
+		jobs[key][itemInd].Done = true
 		return "Well done!"
 	}
 
@@ -236,6 +244,7 @@ func remindJobs(
 	subscriberID int64,
 	period time.Duration,
 	done chan struct{},
+	chatID int64,
 ) {
 	tNow := time.Now()
 	// yyyy, mm, dd := tNow.Date()
@@ -254,7 +263,7 @@ func remindJobs(
 		select {
 		case now := <-t.C:
 			date := timeToDate(now)
-			jobList := getAllJobs(date)
+			jobList := getAllJobs(date, chatID)
 			msg := tgbotapi.NewMessage(subscriberID, jobList)
 			if err := SendMsg(tgbot, &msg); err != nil {
 				log.Printf("Something went wrong: %v\n", err)
@@ -266,12 +275,13 @@ func remindJobs(
 	}
 }
 
-func getAllJobs(t common.Date) string {
+func getAllJobs(t common.Date, chatID int64) string {
 	var msg string
-	if len(jobs[t]) == 0 {
+	key := JKey{ChatID: chatID, Date: t}
+	if len(jobs[key]) == 0 {
 		msg = "No jobs were planned on this date."
 	} else {
-		for i, job := range jobs[t] {
+		for i, job := range jobs[key] {
 			jobState := getDoneStr(job.Done)
 			msg += fmt.Sprintf("%d. %s - %s\n", i+1, job.Job, jobState)
 		}
@@ -281,7 +291,7 @@ func getAllJobs(t common.Date) string {
 
 func timeToDate(t time.Time) common.Date {
 	y, m, d := t.Date()
-	return common.Date{y, m, d}
+	return common.Date{Year: y, Month: m, Day: d}
 }
 
 func getDoneStr(b bool) string {
