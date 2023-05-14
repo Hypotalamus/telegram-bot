@@ -1,4 +1,4 @@
-module bot
+module bot_module
 
 go 1.18
 
