@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -36,7 +37,7 @@ type JKey struct {
 ****************/
 
 const dateFormat = "02-01-2006"
-const period = 10 * time.Second
+const period = 24 * time.Hour
 
 const (
 	Idle State = iota
@@ -121,9 +122,11 @@ func SubscribeCmdResponse(tgbot *tgbotapi.BotAPI, chatID int64, db *bolt.DB) str
 			msg = "You are already subscribed. To unsubscribe enter /unsubscribe command."
 		} else {
 			msg = "You are subscribed now. To unsubscribe enter /unsubscribe command."
-			ch := make(chan struct{})
-			subscribers[chatID] = ch
-			go remindJobs(tgbot, chatID, period, ch, chatID, db)
+			err := subscribe(tgbot, chatID, db)
+			if err != nil {
+				msg += fmt.Sprintf(
+					" But subscription was not placed in database. Error: %v", err)
+			}
 		}
 	} else {
 		msg = "Please complete current operation or cancel it using /cancel."
@@ -131,15 +134,18 @@ func SubscribeCmdResponse(tgbot *tgbotapi.BotAPI, chatID int64, db *bolt.DB) str
 	return msg
 }
 
-func UnsubscribeCmdResponse(chatID int64) string {
+func UnsubscribeCmdResponse(chatID int64, db *bolt.DB) string {
 	var msg string
 	if CurrState == Idle {
 		if _, ok := subscribers[chatID]; !ok {
 			msg = "You are not subscribed."
 		} else {
 			msg = "You are unsubscribed now."
-			close(subscribers[chatID])
-			delete(subscribers, chatID)
+			err := unsubscribe(db, chatID)
+			if err != nil {
+				msg += fmt.Sprintf(
+					" But subscription was not removed from database. Error: %v", err)
+			}
 		}
 	} else {
 		msg = "Please complete current operation or cancel it using /cancel."
@@ -271,18 +277,29 @@ func SendMsg(tgbot *tgbotapi.BotAPI, msg *tgbotapi.MessageConfig) error {
 	return err
 }
 
+func subscribe(tgbot *tgbotapi.BotAPI, chatID int64, db *bolt.DB) error {
+	ch := make(chan struct{})
+	subscribers[chatID] = ch
+	err := rememberSubscriber(db, chatID)
+	go remindJobs(tgbot, chatID, ch, db)
+	return err
+}
+func unsubscribe(db *bolt.DB, chatID int64) error {
+	close(subscribers[chatID])
+	delete(subscribers, chatID)
+	err := forgetSubscriber(db, chatID)
+	return err
+}
+
 func remindJobs(
 	tgbot *tgbotapi.BotAPI,
 	subscriberID int64,
-	period time.Duration,
 	done chan struct{},
-	chatID int64,
 	db *bolt.DB,
 ) {
 	tNow := time.Now()
-	// yyyy, mm, dd := tNow.Date()
-	nextStart := tNow.Add(1 * time.Minute)
-	// nextStart := time.Date(yyyy, mm, dd+1, 9, 0, 0, 0, tNow.Location())
+	yyyy, mm, dd := tNow.Date()
+	nextStart := time.Date(yyyy, mm, dd+1, 9, 0, 0, 0, tNow.Location())
 	diff := nextStart.Sub(tNow)
 	preTimer := time.NewTimer(diff)
 	select {
@@ -296,7 +313,7 @@ func remindJobs(
 		select {
 		case now := <-t.C:
 			date := timeToDate(now)
-			joblist, err := getAllJobs(date, chatID, db)
+			joblist, err := getAllJobs(date, subscriberID, db)
 			if err != nil {
 				log.Printf("Could not read from database: %v\n", err)
 			}
@@ -383,9 +400,62 @@ func getData(db *bolt.DB, chatID int64, date common.Date) ([]common.JItem, error
 	return res, err
 }
 
-func SetupDB(db *bolt.DB) error {
+func SetupDB(db *bolt.DB, tgbot *tgbotapi.BotAPI) error {
 	err := db.Update(func(tx *bolt.Tx) error {
 		_, err := tx.CreateBucketIfNotExists([]byte("Default"))
+		if err != nil {
+			return err
+		}
+		_, err = tx.CreateBucketIfNotExists([]byte("Subscribers"))
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	err = restoreSubscribers(db, tgbot)
+	return err
+}
+
+func restoreSubscribers(db *bolt.DB, tgbot *tgbotapi.BotAPI) error {
+	subscribers := []int64{}
+	db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("Subscribers"))
+		c := b.Cursor()
+
+		for k, _ := c.First(); k != nil; k, _ = c.Next() {
+			chatID := int64(binary.LittleEndian.Uint64(k))
+			subscribers = append(subscribers, chatID)
+		}
+		return nil
+	})
+	for _, subscriber := range subscribers {
+		err := subscribe(tgbot, subscriber, db)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func rememberSubscriber(db *bolt.DB, chatID int64) error {
+	err := db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("Subscribers"))
+		key := make([]byte, 8)
+		binary.LittleEndian.PutUint64(key, uint64(chatID))
+		val := make([]byte, 1)
+		val[0] = 1
+		err := b.Put(key, val)
+		return err
+	})
+	return err
+}
+
+func forgetSubscriber(db *bolt.DB, chatID int64) error {
+	err := db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("Subscribers"))
+		key := make([]byte, 8)
+		binary.LittleEndian.PutUint64(key, uint64(chatID))
+		err := b.Delete(key)
 		return err
 	})
 	return err

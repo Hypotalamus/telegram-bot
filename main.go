@@ -1,10 +1,3 @@
-/* TODO:
-- restore subscribers on bootloading
-
-- change start time to 9:00 next day (remindJobs)
-- change period to 1 day
-*/
-
 package main
 
 import (
@@ -32,7 +25,7 @@ func main() {
 	}
 	defer db.Close()
 
-	err = bot.SetupDB(db)
+	err = bot.SetupDB(db, tgbot)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -63,7 +56,7 @@ func main() {
 			case "subscribe":
 				msgText = bot.SubscribeCmdResponse(tgbot, update.Message.Chat.ID, db)
 			case "unsubscribe":
-				msgText = bot.UnsubscribeCmdResponse(update.Message.Chat.ID)
+				msgText = bot.UnsubscribeCmdResponse(update.Message.Chat.ID, db)
 			case "done":
 				msgText = bot.DoneCmdResponse()
 			default:
